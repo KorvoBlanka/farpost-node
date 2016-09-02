@@ -3,7 +3,8 @@
   import_server => 'localhost:19099',
   pause => 10,
   phone_prefix => '495',
-  timezone => '+10',
+  timezone => '+1000',
   time_diff_hack => '7',
-  media_id => 5
+  media_id => 6,
+  locality => 'Хабаровск',
 }
