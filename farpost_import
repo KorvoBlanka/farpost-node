@@ -27,7 +27,7 @@ my $import_server = $config->{import_server};
 my $timezone = $config->{timezone};
 my $pause = $config->{pause};
 my $media_id = $config->{media_id};
-my $site_url = 'www.farpost.ru';
+my $site_url = 'http://www.farpost.ru';
 my $host = 'www.farpost.ru';
 my $referer = 'http://www.farpost.ru';
 
