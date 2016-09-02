@@ -1,0 +1,622 @@
+#!/usr/bin/env perl
+
+use FindBin;
+use lib "$FindBin::Bin/..";
+
+use Modern;
+
+use Util::Config;
+use Util::PhoneNum;
+
+use Mojo::ByteStream;
+use Mojo::UserAgent;
+use DateTime;
+use DateTime::Format::Strptime;
+use Text::Trim;
+use JSON;
+use Data::Dumper;
+
+$Data::Dumper::Terse = 1;
+$Data::Dumper::Quotekeys = 0;
+
+no warnings 'experimental';
+
+my $config = Util::Config::get_config();
+
+my $import_server = $config->{import_server};
+my $timezone = $config->{timezone};
+my $pause = $config->{pause};
+my $media_id = $config->{media_id};
+my $site_url = 'www.farpost.ru';
+my $host = 'www.farpost.ru';
+my $referer = 'http://www.farpost.ru';
+
+my $META = {
+    params => {
+        dict => {
+            bathrooms => {
+                '__field__' => 'bathroom_id',
+                '^с\\/у\\s+смежн\\.?$' => 8,
+                '^смежн\\.?\\s+с\\/у$' => 8,
+                '^с\\/у\\s+разд\\.?$' => 3,
+                '^без\\s+удобств$' => 1,
+                '^с\\/у\\s+совм\\.?$' => 8
+            },
+            balconies => {
+                '__field__' => 'balcony_id',
+                '^б\\/з$' => 5,
+                '^б\\/балк\\.?$' => 1,
+                '^2\\s+лодж\\.?$' => 8,
+                '^б\\/б$' => 1,
+                '^балк\\.?$' => 2,
+                '^лодж\\.?$' => 3,
+                '^2\\s+балк\\.?$' => 7,
+                '^л\\/з$' => 6
+            },
+            ap_schemes => {
+                '__field__' => 'ap_scheme_id',
+                '^улучшенная\\.?$' => 3,
+                '^хрущевка\\.?$' => 2,
+                '^хрущовка\\.?$' => 2,
+                '^общежитие' => 6,
+                '^индивидуальная\\.?$' => 6,
+                '^индивидуальная\\.?\\s+планировка\\.?$' => 5,
+                '^улучшенная\\.?$' => 3,
+                '^брежневка\\.?$' => 3,
+                '^новая\\.?\\s+планировка\\.?$' => 4,
+                '^сталинка\\.?$' => 1,
+                '^(?:улучшенная\\.?\\s+планировка\\.?)|(?:планировка\\.?\\s+улучшенная\\.?)|(?:улучшенная\\.)$' => 3,
+                '^хрущ\\.?$' => 2,
+                '^общежити' => 6,
+                '^инд\\.?\\s+план\\.?$' => 5,
+                '^брежн\\.?$' => 3,
+                '^нов\\.?\\s+план\\.?$' => 4,
+                '^стал\\.?$' => 1,
+                '^(?:улучш\\.?\\s+план\\.?)|(?:план\\.?\\s+улучш\\.?)|(?:улучш\\.)$' => 3
+            },
+            house_types => {
+                '__field__' => 'house_type_id',
+                '^кирп\\.?$' => 1,
+                '^монолит.+?\\-кирп\\.?$' => 7,
+                '^монолитн?\\.?$' => 2,
+                '^пан\\.?$' => 3,
+                '^брус$' => 5,
+                '^дерев\\.?$' => 4
+            },
+            conditions => {
+                '__field__' => 'condition_id',
+                '^соц\\.?\\s+ремонт$' => 2,
+                '^тр\\.?\\s+ремонт$' => 6,
+                'еврорем' => 4,
+                '^отл\\.?\\s+сост\\.?$' => 12,
+                '^хор\\.?\\s+сост\\.?$' => 11,
+                '^сост\\.?\\s+хор\\.?$' => 11,
+                '^удовл\\.?\\s+сост\\.?$' => 9,
+                '^после\\s+строит\\.?$' => 1,
+                '^сост\\.?\\s+отл\\.?$' => 12,
+                '^дизайнерский ремонт$' => 5,
+                '^п\\/строит\\.?$' => 1,
+                '^сост\\.?\\s+удовл\\.?$' => 9,
+                '^т\\.\\s*к\\.\\s*р\\.$' => 7,
+                '^сделан ремонт$' => 3,
+                '^норм\\.?\\s+сост\\.?$' => 10,
+                '^треб\\.?\\s+ремонт$' => 6,
+                '^сост\\.?\\s+норм\\.?$' => 10
+            },
+            room_schemes => {
+                '__field__' => 'room_scheme_id',
+                '^комн\\.?\\s+разд\\.?$' => 3,
+                'икарус' => 5,
+                '^разд\\.?\\s+комн\\.?$' => 3,
+                '^смежн\\.?\\s+комн\\.?$' => 4,
+                '^комн\\.?\\s+смежн\\.?$' => 4,
+                '^кухня\\-гостиная$' => 2,
+                '^студия$' => 1
+            }
+        },
+    }
+};
+
+my $parser = DateTime::Format::Strptime->new( pattern => '%Y-%m-%d %H:%M:%S' );
+
+my $ua = Mojo::UserAgent->new;
+$ua->max_redirects(4);
+if ($config->{interface}) {
+    say 'binding to ' . $config->{interface};
+    $ua->local_address($config->{interface});
+}
+
+while (1) {
+    say 'cycle starts';
+    import_farpost ();
+    sleep 3;
+}
+
+sub import_farpost {
+    my $url_list = get_url_list();
+
+    say Dumper $url_list;
+
+    my $data_list = process_url_list($url_list);
+
+    say Dumper $data_list;
+
+    send_data($data_list);
+}
+
+sub send_data {
+    my $data_list = shift;
+
+    my $try_count = 10;
+
+    for my $data (@{$data_list}) {
+        say 'sending data';
+
+        my $url_str = $import_server . '/remoteimport/upload_result';
+        my $data_str = Dumper $data;
+        my $done = 0;
+        while (!$done) {
+            my $tx = $ua->post($url_str => form => {data => $data_str});
+            if (my $res = $tx->success) {
+              $done = 1 if $res->json->{state} eq 'ok';
+              say Dumper $res->json;
+            } else {
+
+            }
+            $try_count -= 1;
+            if ($try_count == 0) {
+                $done = 1;
+                say 'fail to send';
+            }
+        }
+
+    }
+}
+
+sub get_url_list {
+    my $url_list;
+
+    my $tx = $ua->get($import_server . '/remoteimport/get_task?source=farpost&count=1');
+
+    if (my $res = $tx->success) {
+        $url_list = $res->json->{list};
+    } else {
+
+    }
+
+    return $url_list;
+}
+
+sub process_url_list {
+    my ($url_list_ref) = @_;
+    my $data_list = [];
+
+    for my $item (@$url_list_ref) {
+
+        my $item_url = $site_url . $item->{url};
+
+        say 'processing ' . $item_url;
+
+        my $data = {
+            source_media_id => $media_id,
+            source_url => $item_url,
+            type_code => '',
+            offer_type_code => '',
+            add_date => 'now()',  # fix it!
+            retry => 15,
+        };
+
+        eval {
+            my $dom;
+            while ($data->{retry} > 0) {
+                sleep 5;
+                my $res = get_res($item_url);
+                if ($res) {
+                    $dom = $res->dom;
+                    eval {
+                        parse_adv($dom, $data);
+                    } or do {
+                        say $@;
+                    }
+                }
+            }
+
+        } or do {
+            say $@;
+        };
+        delete $data->{retry};
+        push @{$data_list}, $data;
+        sleep $pause;
+    }
+
+    return $data_list;
+}
+
+sub parse_adv {
+    my ($dom, $data) = @_;
+
+    # описание
+    my $dsk = '';
+    if ($dom->find('p[data-field="text"]')->size > 0) {
+        $dsk = $dom->find('p[data-field="text"]')->first->text;
+        $data->{'source_media_text'} = $dsk;
+    }
+
+    # дата добавления
+    my $date_str = $dom->find('a[class="ajaxLink"]')->first->text;
+    say $date_str;
+    my $dt = parse_date($date_str);
+    if ($config->{time_diff_hack}) {
+        my $dur = DateTime::Duration->new(hours => $config->{time_diff_hack});
+        $dt->add_duration($dur);
+    }
+    $data->{'add_date'} = $dt->datetime() . $timezone;  # fix it!
+    say $data->{'add_date'};
+
+    # найдем телефон
+    my @owner_phones = ();
+    if ($dom->find('div[class="contacts"]')->size > 0) {
+
+        sleep 5;
+
+        my $contacts = $dom->find('div[class="contacts"]')->first;
+        my $c_ref = $contacts->find('a[class~="viewAjaxContacts"]')->first->{href};
+
+        my $c_res = get_res($site_url . $c_ref . '?ajax=1',
+            $referer,
+            $host,
+            'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+        );
+
+        $data->{'retry'} -= 1;
+
+        if ($c_res) {
+            my $c_dom = $c_res->dom;
+            if ($c_dom->find('form')->size > 0) {
+                say 'capcha, retry';
+
+                undef $ua;
+                sleep 30;
+                $ua = Mojo::UserAgent->new;
+                $ua->max_redirects(4);
+                $ua->max_connections(0);
+                get_res('http://khabarovsk.farpost.ru/realty/sell_flats/?city=4&page=1');
+
+                return unless $data->{'retry'} == 0;
+            } else {
+
+                $data->{'retry'} = 0;
+
+                my $phone_str = $c_dom->find('span[class="phone"]')->each(sub {
+                    my $phone_str = $_->text;
+                    say $phone_str;
+                    $phone_str =~ s/\D//g;
+                    if (length $phone_str > 0) {
+                        if (my $phone_num = Util::PhoneNum->parse($phone_str, $config->{phone_prefix})) {
+                            say $phone_num;
+                            push @owner_phones, $phone_num;
+                        }
+                    }
+                });
+            }
+        }
+    }
+    $data->{'owner_phones'} = \@owner_phones;
+
+    $dom->find('div[class="fieldset"] > div[class="field"] > div[class="value"] > span')->each(sub {
+        if (lc($_->text) =~ /агентства/) {
+            my $seller = $dom->find('span[class~="userNick"]')->first->all_text;
+            say 'mediator ' . $seller;
+            $data->{mediator_company} = $seller;
+        }
+    });
+
+    my $addr;
+    # адрес, улица + номер дома или только улица
+
+    my $addr_o = $dom->find('span[data-field="street-district"]');
+    if ($addr_o->size > 0) {
+        $addr = $addr_o->first->text;
+    } else {
+        my $nb = $dom->find('span[data-field="street-buildingId"]');
+        my $ns = $dom->find('span[data-field="street"]');
+        if ($nb->size > 0) {
+            $addr = $nb->first->all_text;
+        } elsif ($ns->size > 0) {
+            $addr = $ns->first->all_text;
+        }
+    }
+
+    if ($addr) {
+        $data->{'address'} = $addr;
+    }
+
+    # Распознавание адреса
+    if ($addr) {
+        $data->{'locality'} = 'Хабаровск'; # ???
+    }
+
+    my $t;
+    my $n;
+    $t = $data->{source_url};
+
+    # offer type code
+    if ($t =~ /rent/i) {
+        $data->{offer_type_code} = 'rent';
+    } else {
+        $data->{offer_type_code} = 'sale';
+    }
+
+    # type code
+    if ($t =~ /flats/i) {
+        $data->{'type_code'} = 'apartment';
+    }
+    if ($t =~ /apartment/i) {
+        $data->{'type_code'} = 'apartment';
+    }
+    if ($t =~ /houses/i) {
+        $data->{'type_code'} = 'house';
+    }
+    if ($t =~ /land/i) {
+        $data->{'type_code'} = 'land';
+    }
+    if ($t =~ /dacha/i) {
+        $data->{'type_code'} = 'dacha';
+    }
+    if ($t =~ /garage/i) {
+        $data->{'type_code'} = 'garage';
+    }
+    if ($t =~ /business_realty/i) {
+        $data->{'type_code'} = 'other';
+    }
+
+
+    # check title
+    $n = $dom->find('span[data-field="subject"]');
+    if ($n->size > 0) {
+        $t = $n->first->text;
+        if ($t =~ /торговое помещение/i) {
+            $data->{'type_code'} = 'market_place';
+        }
+        elsif ($t =~ /свободного назначения/i) {
+            $data->{'type_code'} = 'gpurpose_place';
+        }
+        elsif ($t =~ /производствен/i) {
+            $data->{'type_code'} = 'production_place';
+        }
+        elsif ($t =~ /магазин/i) {
+            $data->{'type_code'} = 'market_place';
+        }
+        elsif ($t =~ /павильон/i) {
+            $data->{'type_code'} = 'market_place';
+        }
+        elsif ($t =~ /склад/i) {
+            $data->{'type_code'} = 'warehouse_place';
+        }
+        elsif ($t =~ /баз[а|у]/i) {
+            $data->{'type_code'} = 'warehouse_place';
+        }
+        elsif ($t =~ /авто-комплекс/i) {
+            $data->{'type_code'} = 'autoservice_place';
+        }
+        elsif ($t =~ /нежилое/i) {
+            $data->{'type_code'} = 'gpurpose_place';
+        }
+        elsif ($t =~ /помещение/i) {
+            $data->{'type_code'} = 'gpurpose_place';
+        }
+        elsif ($t =~ /здание/i) {
+            $data->{'type_code'} = 'building';
+        }
+        elsif ($t =~ /коттедж/i) {
+            $data->{'type_code'} = 'cottage';
+        }
+    }
+
+    # квартира или комната
+    # количество комнат
+    $n = $dom->find('span[data-field="flatType"]');
+    if ($n->size) {
+        $t = $n->first->text;
+        # d-к квратира.
+        if ($t eq 'Комната') {
+            $data->{'type_code'} = 'room';
+        } elsif ($t =~ /^(\d{1,}).*?$/) {
+            $data->{'rooms_count'} = $1;
+        }
+    }
+
+    # жилая площадь
+    $n = $dom->find('span[data-field="areaLiving"]');
+    if ($n->size > 0) {
+        $t = $n->first->text;
+        # d м2.
+        if ($t =~ /^(\d{1,}).*?$/) {
+            $data->{'square_total'} = $1;
+        }
+    }
+
+    # площадь участка
+    $n = $dom->find('span[data-field="areaTotal"]');
+    if ($n->size > 0) {
+        $t = $n->first->text;
+        if ($t =~ /(\d+(?:,\d+)?)\s+кв\.\s*м/) {
+            $t =~ s/\s//;
+            if ($t =~ /^(\d{1,}).*?$/) {
+                $data->{'square_land'} = $1;
+            }
+        } elsif ($t =~ s/(\d+)\s+сот\.?//) {
+            $data->{'square_land'} = $1;
+            $data->{'square_land_type'} = 'ar';
+        } elsif ($t =~ s/(\d(?:,\d+)?)\s+га//) {
+            $data->{'square_land'} = $1 =~ s/,/./r;
+            $data->{'square_land_type'} = 'hectare';
+        }
+    }
+
+
+    # цена в рублях, переведем в тыс.
+    $n = $dom->find('span[data-field="price"]');
+    if ($n->size > 0) {
+        $t = $n->first->all_text;
+        $t =~s/\s//g;
+        if ($t =~ /^(\d{1,}).*?$/) {
+            $data->{'owner_price'} = $1 / 1000;
+        }
+    }
+
+    # Разделим остальную часть обявления на части и попытаемся вычленить полезную информацию
+    my @bp = grep { $_ && length($_) > 1 } trim(split /[,()]/, $dsk);
+    for my $el (@bp) {
+        # Этаж/этажность
+        if ($el =~ /^(\d{1,2})\/(\d{1,2})$/) {
+            if ($2 > $1) {
+                $data->{'floor'} = $1;
+                $data->{'floors_count'} = $2;
+            }
+            next;
+        }
+        for my $k (keys %{$META->{'params'}->{'dict'}}) {
+            my %dict = %{$META->{'params'}->{'dict'}->{$k}};
+            my $field = delete $dict{'__field__'};
+            for my $re (keys %dict) {
+                if ($el =~ /$re/i) {
+                    $data->{$field} = $dict{$re};
+                    last;
+                }
+            }
+        }
+    }
+
+    # вытащим фото
+    $dom->find('div[class="bulletinImages"] img')->each ( sub {
+        my $img_url = $_->{'data-zoom-image'};
+        unless ($img_url) {
+            $img_url = $_->{'src'};
+        }
+        push @{$data->{photo_url}}, $img_url;
+      });
+
+    # Этаж#2
+    if (!$data->{'floor'} && $dsk =~ /(\d{1,2})\s+эт\.?/) {
+        $data->{'floor'} = $1;
+    }
+}
+
+sub get_res {
+    my ($url, $referer, $host, $accept) = @_;
+
+    say 'get_res ' . $url;
+
+    my $res;
+    my $retry = 10;
+
+    my @headers;
+    push @headers, 'Referer' => $referer if $referer;
+    push @headers, 'Accept' => $accept if $accept;
+    while ($retry > 0) {
+        $retry -= 1;
+        if ($retry < 3) {
+            say 'retry left ' . $retry;
+        }
+
+        my $t = $ua->get($url, {
+            'Host' => $host,
+            'Connection' => 'keep-alive',
+            'User-Agent' => 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_9_3) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/35.0.1916.114 Safari/537.36',
+            'Accept-Encoding' => 'gzip,deflate,sdch',
+            'Accept-Language' => 'ru-RU,ru;q=0.8,en-US;q=0.6,en;q=0.4',
+            @headers,
+        });
+
+        say 'code: ' . $t->res->code;
+
+        if ($t->res->code == 200) {
+            $res = $t->res;
+            last;
+        } elsif ($t->res->code == 404) {
+            last;
+        }
+
+        sleep 5;
+    }
+
+    return $res;
+}
+
+
+sub parse_date {
+    my $date = lc(shift);
+
+    my $res;
+    my $dt_now = DateTime->now(time_zone => "+1000");
+    my $year = $dt_now->year();
+    my $mon = $dt_now->month();
+    my $mday = $dt_now->mday();
+
+    if ($date =~ /(\d{1,2}):(\d{1,2}), сегодня/) {
+        $res = $parser->parse_datetime("$year-$mon-$mday $1:$2:00");
+        if ($res > $dt_now) {
+            # substr 1 day
+            $res->subtract(days => 1);
+        }
+    } elsif ($date =~ /(\d{1,2}):(\d{1,2}), вчера/) {
+        $res = $parser->parse_datetime("$year-$mon-$mday $1:$2:00");
+        # substr 1 day
+        $res->subtract(days => 1);
+    } elsif ($date =~ /(\d{1,2}):(\d{1,2}), (\d+) (\w+)/) {
+        my $a_mon = month_num($4);
+        $res = $parser->parse_datetime("$year-$a_mon-$3 $1:$2:00");
+    } elsif ($date =~ /(\d+) (\w+) (\d+)/) {
+        my $a_mon = month_num($2);
+        $res = $parser->parse_datetime("$3-$a_mon-$1 12:00:00");
+    } else {
+        $res = $dt_now;
+    }
+
+    return $res;
+}
+
+sub month_num {
+    my $month_str = lc(shift);
+
+    given ($month_str) {
+        when (/янв/) {
+            return 1;
+        }
+        when (/фев/) {
+            return 2;
+        }
+        when (/мар/) {
+            return 3;
+        }
+        when (/апр/) {
+            return 4;
+        }
+        when (/мая/) {
+            return 5;
+        }
+        when (/июн/) {
+            return 6;
+        }
+        when (/июл/) {
+            return 7;
+        }
+        when (/авг/) {
+            return 8;
+        }
+        when (/сен/) {
+            return 9;
+        }
+        when (/окт/) {
+            return 10;
+        }
+        when (/ноя/) {
+            return 11;
+        }
+        when (/дек/) {
+            return 12;
+        }
+    }
+    return 0;
+}
