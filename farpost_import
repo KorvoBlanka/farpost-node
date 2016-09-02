@@ -210,6 +210,7 @@ sub process_url_list {
             my $dom;
             while ($data->{retry} > 0) {
                 sleep 5;
+                $data->{retry} -= 1;
                 my $res = get_res($item_url);
                 if ($res) {
                     $dom = $res->dom;
@@ -267,8 +268,6 @@ sub parse_adv {
             $host,
             'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
         );
-
-        $data->{'retry'} -= 1;
 
         if ($c_res) {
             my $c_dom = $c_res->dom;
